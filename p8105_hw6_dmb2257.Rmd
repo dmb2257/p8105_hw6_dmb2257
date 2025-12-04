@@ -41,80 +41,75 @@ homicide_df =
 ```
 
 
-This code chunk uses the glm function to fit a logistic regression with resolved vs unresolved as the outcome and victim age, sex, and race as the predictors. 
+This code chunk uses the glm function to fit a logistic regression with resolved vs unresolved as the outcome and victim age, sex, and race as the predictors.
 ```{r}
 baltimore_df =
   homicide_df|>
   select(city_state, resolved, victim_age, victim_race, victim_sex)|>
   filter(city_state %in% c("Baltimore, MD"))
 
-baltimore_glm =
-  baltimore_df|>
-  glm(resolved ~ victim_age + victim_race + victim_sex, data = _, family = binomial())|>
-  broom::tidy()
+fit_baltimore= 
+baltimore_df|>
+glm(resolved ~ victim_age + victim_race + victim_sex, data = _, family = binomial())
 
-baltimore_glm|>
+# This obtains the OR for Baltimore
+fit_baltimore|>
+  broom::tidy()|>
   mutate(OR = exp(estimate))|>
-  select(term, log_OR = estimate, OR, p.value)|>
+  select(term, OR)|>
+  filter(term %in% c("victim_sexMale"))|>
+    knitr::kable(digits = 3)
+
+fit_baltimore|>
+  broom::tidy()|>
+  mutate(OR = exp(estimate))|>
+  select(term, OR)|>
+  filter(term %in% c("victim_sexMale"))|>  
+  group_by(term)|>
+  summarize(
+    ci_lower_or_est = quantile(OR, 0.025),
+    ci_upper_or_est = quantile(OR, 0.975))|>
   knitr::kable(digits = 3)
 
 ```
 
-This nests the data by city and creates two functions. The first to obtain the glm output. The second obtains the adjusted OR and confidence interval. 
+This code chunk uses list columns to fit the logistic regression model for each city and obtain the OR and CI for each city. 
 ```{r}
 nested_df <-
   homicide_df|>
   group_by(city_state)%>%
   nest()
 
-city_func <-
-  function(df) {
-      df|>
-  glm(resolved ~ victim_age + victim_race + victim_sex, data = _, family = binomial())|>
-  broom::tidy()
-  }
+nested_results = 
+  nested_df |> 
+  mutate(
+    city_mod = map(data, \(df) glm(resolved ~ victim_age + victim_race + victim_sex, data = df, family = binomial())),
+    results = map(city_mod, broom::tidy)) |> 
+  select(-data, -city_mod)|>
+  unnest(results) |>
+  filter(term %in% c("victim_sexMale"))
 
-or_func <-
-  function(df){
-  df|>
-  mutate(OR = exp(estimate))|>
-  select(term, log_OR = estimate, OR, p.value)
-  }
 
-```
+analysis_results =
+nested_results |> 
+  group_by(city_state) |> 
+  summarize(OR = exp(estimate),
+            ci_lower = (quantile(OR, 0.025)), 
+            ci_upper = (quantile(OR, 0.975)))
 
-This uses list columns to apply the function to each city in the dataset. 
-```{r}
-listcol_estimates <- 
-  map(nested_df$data, city_func)
-
-nested_df2 =
-  nested_df %>%
-  mutate(list_estimates = map(data, city_func))|>
-  select(-data)
-
-listcol_func2<-
-  map(nested_df2$list_estimates, or_func)
-
-nested_df3 = 
-  nested_df2 %>%
-  mutate(list_estimates2 = map(list_estimates, or_func))
-
-tidy_df =
-  nested_df3|>
-  unnest(list_estimates2)|>
-  select(-list_estimates)|>
-  filter((term %in% c("victim_sexMale")))
 ```
 
 This creates a plot that shows the estimated ORs and CIs for each city.
 ```{r}
-tidy_df |>
+analysis_results |>
   ggplot(
     aes(fct_reorder(city_state, OR), OR))+
   geom_col()+
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 0.2)+
     theme(axis.text.x = element_text(angle = 70, hjust =1))
 ```
+Based on the plot, The greatest OR of homicides occurs in ALbuquerque,NM. The lowest OR occurs in New York, NY. 
+
 
 # Problem 2
 This loads and cleans the names of the weather data set.
@@ -131,7 +126,7 @@ boot_sample = function(df){
 }
 
 boot_straps=
-  tibble(strap_number = 1:50)|>
+  tibble(strap_number = 1:5000)|>
   mutate(
     strap_sample = map(strap_number, \(i) boot_sample(df = weather_df))
   )
@@ -139,72 +134,77 @@ boot_straps=
 boot_straps
 ```
 
-This code chunk obtains runs the simple linear regression model for all of the samples. It then uses broom::glance to extract r.squared and broom::tidy to obtain B1(tmin) and B2(prcp). The data is then unnested and only the necessary columns are selected. A new variable (beta_est) is created, which is the value from computing B1/B2. 
+This code chunk obtains runs the simple linear regression model for all of the samples with tmax as the response and tmin and prcp as the predictors. It then uses broom::glance to extract r.squared and broom::tidy to obtain B1(tmin) and B2(prcp). The data is then unnested and only the necessary columns are selected. A new variable (beta_est) is created, which is the value from computing B1/B2. 
 ```{r}
-bootstrap_results= 
+#This computes the r.squared estimate for each bootstrap sample
+bootstrap_rsq= 
   boot_straps |>
   mutate(
     models = map(strap_sample, \(df) lm(tmax ~ tmin + prcp, data = df)),
-    rsq_results = map(models, broom::glance),
-    beta_results = map(models, broom::tidy)) |> 
+    rsq_results = map(models, broom::glance))|>
   select(-strap_sample, -models) |> 
-  unnest(rsq_results, beta_results) |>
-  select(strap_number, r.squared, term, estimate)|>
+  unnest(rsq_results) 
+
+# This computes the B1/B2 estimate (beta_ratio) for each bootstrap sample
+bootstrap_beta= 
+  boot_straps |>
+  mutate(
+    models = map(strap_sample, \(df) lm(tmax ~ tmin + prcp, data = df)),
+    beta_results = map(models, broom::tidy))|>
+  select(-strap_sample, -models) |> 
+  unnest(beta_results)|>
   filter((term %in% c("tmin", "prcp")))|>
+  select(strap_number, term, estimate)|>
   pivot_wider(
     names_from= term,
     values_from = estimate)|>
-  mutate(beta_est = tmin/prcp)|>
-  select(-tmin)|>
-  select(-prcp)
+  mutate(beta_ratio = tmin/prcp)
+
 ```
 
 This code chunk plots the distribution of the r.squared estimate
 ```{r}
-bootstrap_results|>
+bootstrap_rsq|>
   ggplot(aes(x = r.squared)) + geom_density()
 ```
-The r.squared estimates appear to have a bell-curved distribution. The lowest densities occurs at the maximum and minimum r.squared values. 
+The r.squared estimates appear to have a bell-curved distribution. The lowest densities occurs near the lowest and greatest r.squared values. 
 
-This code chunk plots the distribution of the b1/b2 estimate
+This code chunk plots the distribution of the b1/b2 estimate.
 ```{r}
-bootstrap_results|>
-  ggplot(aes(x = beta_est)) + geom_density()
+bootstrap_beta|>
+  ggplot(aes(x = beta_ratio)) + geom_density()
 ```
-The distribution of B1/B2 estimates have a tail towards the lower values of beta_est.
+The distribution has a heavy tail towards the lower values of beta_ratio. The greatest density occurs when the beta ratio is approximately -275.
 
-This code chunk identifies the 2.5% and 97.5% quantiles to provide a 95% confidence interval for r.squared and b1/b2. It then creates a tidy table of the r.squared and b1/b2 estimates with the respective confidence intervals, in each sample.
-
+This code chunk identifies the 2.5% and 97.5% quantiles to provide a 95% confidence interval for r.squared and b1/b2. For the r.squared estimate, the 95% confidence interval is (0.9344391, 0.946677). For the beta ratio, the 95% confidence interval is (-280.7735,-124.1262).
 ```{r}
-boostrap_ci=
-bootstrap_results |>
-  group_by(strap_number)|>
+bootstrap_rsq |>
+  mutate(estimate = "r.squared")|>
+  group_by(estimate)|>
   summarize(
-    ci_lower_est = quantile(r.squared, 0.025),
-    ci_upper_est = quantile(r.squared, 0.0975),
-    ci_lower_beta = quantile(beta_est, 0.025),
-    ci_upper_beta = quantile(beta_est, 0.0975))|>
-  ungroup()
+    ci_lower_rsq_est = quantile(r.squared, 0.025),
+    ci_upper_rsq_est = quantile(r.squared, 0.975))|>
+  knitr::kable()
 
-est_ci_df =
-  left_join(boostrap_ci, bootstrap_results, by= "strap_number")|>
-  select(strap_number, r.squared, ci_lower_est, ci_upper_est, beta_est, ci_lower_beta, ci_upper_beta)
-    
+bootstrap_beta |>
+  mutate(estimate = "beta_ratio")|>
+  group_by(estimate)|>
+  summarize(
+    ci_lower_beta = quantile(beta_ratio, 0.025),
+    ci_upper_beta = quantile(beta_ratio, 0.975))|>
+  knitr::kable()
 ```
 
 
 # Problem 3
 This imports the dataset.
 ```{r}
-data_path <- 
-"C:/Users/dmben/OneDrive/Desktop/data_science_1/p8105_hw6_dmb2257/"
-
 birthweight_df = read.csv(file = "p8105_hw6_dmb2257_files/birthweight.csv")
 ```
 
 This cleans the dataset, renaming the values for categorical variables and changing the numeric values from integers to numeric. 
 ```{r}
-bwt_tidy_df=
+bwtidy_df=
   birthweight_df|>
   janitor::clean_names()|>
   mutate(
@@ -248,37 +248,83 @@ bwt_tidy_df=
   drop_na()
 ```
 
-This is the proposed regression model for birthweight I will be using. The hypothesized structure for the factors that underly birthweight include delwt,  menarche, mheight, momage,  mrace,  ppbmi,  ppwt,  smoken ,  wtgain.
+This code chunk includes the proposed regression model for birthweight I will be using. For this proposed model I included variables regarding the mother's weight. The hypothesized factors that underly birthweight included in this model are mother's weight at delivery, mother's pre-pregnancy BMI, mother's pre-pregnancy weight, and mother's weight gain during pregnancy. 
 ```{r}
-mod1 = lm(bwt ~ delwt + menarche + mheight+ momage + mrace + ppbmi + ppwt+ smoken + wtgain, data = bwt_tidy_df)
+mod1 = lm(bwt ~ delwt + ppbmi + ppwt + wtgain, data = bwtidy_df)
+
 ```
 
 This creates a plot of model residuals against fitted values.
 ```{r}
-resid_df = 
-modelr::add_residuals(bwt_tidy_df, mod1)
-
-pred_df =
-modelr::add_predictions(bwt_tidy_df, mod1)
-
-res_pred_df = 
-  left_join(resid_df, pred_df)
-
-res_pred_df|>
-  ggplot(aes(x = pred, y = resid))+
+bwtidy_df|> 
+add_predictions(mod1)|>
+add_residuals(mod1)|>
+ggplot(aes(x = pred, y = resid))+
   geom_point()
 ```
 
-
-
-This creates a model using length at birth and gestational age as predictors
+This creates a model (mod1) using length at birth and gestational age as predictors
 ```{r}
-mod2 = lm(bwt ~ blength + gaweeks, data = bwt_tidy_df)
+mod2 = lm(bwt ~ blength + gaweeks, data = bwtidy_df)
 ```
 
-This creates a model using head circumference, length, sex, and all interactions
-
+This creates a model (mod3) using head circumference, length, sex, and all interactions.
 ```{r}
-mod3 = lm(bwt ~ bhead*blength*babysex + bhead*blength + blength*babysex + bhead*babysex +bhead +blength +babysex, data = bwt_tidy_df)
+mod3 = lm(bwt ~ bhead*blength*babysex, data = bwtidy_df)
+
+summary(mod3)
 ```
 
+This code chunk compares my model(mod1) to mod2 and mod3. 
+```{r}
+cv_df=
+  crossv_mc(bwtidy_df, 100)
+
+cv_df |>
+  pull(train) |>
+  nth(1)|>
+  as_tibble()
+
+cv_df |>
+  pull(test) |>
+  nth(1)|>
+  as_tibble()
+
+cv_df = 
+  cv_df |>
+  mutate(
+   train = map(train, as_tibble),
+   test = map(test, as_tibble))
+```
+
+
+```{r}
+cv_df = 
+  cv_df |>
+  mutate(
+  linear_mod1 = map(train, \(df) 
+        lm(bwt ~ delwt + ppbmi + ppwt + wtgain, data = df)),
+  linear_mod2 = map(train, \(df) 
+        lm(bwt ~ blength + gaweeks, data = df)),
+  linear_mod3 = map(train, \(df) 
+         lm(bwt ~ bhead*blength*babysex, data = df)))|>
+  
+  mutate(
+    rmse_linear1 = map2_dbl(linear_mod1, test, \ (mod, df) rmse(model = mod, data = df)),
+    rmse_linear2 = map2_dbl(linear_mod2, test, \ (mod, df) rmse(model = mod, data = df)),
+    rmse_linear3 = map2_dbl(linear_mod3, test, \ (mod, df) rmse(model = mod, data = df)))
+```
+
+```{r}
+cv_df|>
+  select(starts_with("rmse"))|>
+  pivot_longer(everything(),
+               names_to = "model",
+               values_to = "rmse",
+               names_prefix = "rmse_")|>
+  mutate(model = fct_inorder(model))|>
+  ggplot(aes(x =model, y = rmse))+
+  geom_violin()
+```
+
+There is a much greater root mean squared errors for the model I proposed. The model with the lowest RMSE is model3, which includes the interactions between the predictors, head circumference, length, and sex. Model 2 also had a lower RMSE than the proposed model, and included length at birth and gestational age as predictors. Neither of these models focused on the mother as the proposed model did. Model 3 produced the lowest RMSE. 
